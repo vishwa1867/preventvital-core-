@@ -15,3 +15,6 @@ desktop.ini
 # Env
 .env
 *.env
+frontend/assets/
+frontend/.claude/
+frontend/.git.backup-repo/
