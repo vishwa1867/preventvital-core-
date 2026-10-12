@@ -1,0 +1,18 @@
+# Root-level blueprint: Render's default Blueprint Path looks here.
+# The service definition lives with its Dockerfile in backend/.
+# NOTE: dockerfilePath/dockerContext are relative to THIS file's directory.
+services:
+  - type: web
+    name: preventvital-ocr
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /
+    autoDeploy: false
+    envVars:
+      - key: EXTRACT_MAX_FILES
+        value: "5"
+      - key: OCR_TIMEOUT_MS
+        value: "60000"
