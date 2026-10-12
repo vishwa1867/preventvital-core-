@@ -7,8 +7,10 @@ services:
     runtime: docker
     plan: free
     region: singapore
+    # Context must be the REPO ROOT so Docker can COPY ../schema into the
+    # image (extract.js reads ../schema/Lab_Test_Schema.json at runtime).
     dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
+    dockerContext: .
     healthCheckPath: /
     autoDeploy: false
     envVars:
