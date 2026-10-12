@@ -1,0 +1,3532 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://preventvital.com/schemas/lab-report-extraction/1.0.0",
+  "title": "PreventVital Lab Report Extraction",
+  "description": "Contract for the output of the OCR -> lab-report extraction pipeline (AI-03). One document describes one uploaded report. The engine consumes only tests whose validation.status is 'pass'. See OCR_Lab_Report_Architecture.md for the pipeline and x-canonicalTests below for the alias catalogue.",
+  "x-schemaVersion": "1.0.0",
+  "x-status": "Draft for review by Ajay. Plausibility bounds and any derived clinical value need clinical sign-off before use (gap analysis 7.8).",
+  "x-consumers": [
+    "AI-03 extraction pipeline",
+    "TEST-03 OCR accuracy evaluation dataset",
+    "VITAL Score engine, via the mapping in x-canonicalTests[].engineField"
+  ],
+
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "source", "extraction", "report", "tests", "validation", "review"],
+
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "1.0.0",
+      "description": "Version of this schema the document was produced against."
+    },
+
+    "source": {
+      "type": "object",
+      "description": "The uploaded artefact. Identifies the file without duplicating it.",
+      "additionalProperties": false,
+      "required": ["mediaId", "mimeType", "sha256", "uploadedAt"],
+      "properties": {
+        "mediaId": { "type": "string", "description": "Media document id in GCS-backed storage." },
+        "mimeType": { "type": "string", "enum": ["application/pdf", "image/jpeg", "image/png", "image/heic", "image/webp", "image/tiff"] },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "Content hash. Deduplicates re-uploads and anchors the audit trail." },
+        "pageCount": { "type": "integer", "minimum": 1 },
+        "sizeBytes": { "type": "integer", "minimum": 0 },
+        "uploadedAt": { "type": "string", "format": "date-time" },
+        "userId": { "type": "string" },
+        "profileId": { "type": ["string", "null"], "description": "Family profile this report belongs to. null = account holder. Never infer this from the report." }
+      }
+    },
+
+    "extraction": {
+      "type": "object",
+      "description": "How this document was produced. Required for reproducibility (ICMR-1.5, AI-01 SR-18).",
+      "additionalProperties": false,
+      "required": ["ocrEngine", "extractedAt", "pipelineVersion"],
+      "properties": {
+        "ocrEngine": { "type": "string", "examples": ["google-document-ai", "tesseract", "azure-doc-intelligence", "fixture"] },
+        "ocrEngineVersion": { "type": "string" },
+        "ocrProcessorId": { "type": "string", "description": "Cloud processor or model id, where the engine has one." },
+        "structuringMethod": { "type": "string", "enum": ["rules", "llm", "hybrid"], "description": "How raw OCR lines became test rows." },
+        "llmModel": { "type": ["string", "null"], "description": "Pinned model version where structuringMethod is llm or hybrid. Null otherwise." },
+        "pipelineVersion": { "type": "string", "description": "Version of the AI-03 pipeline code." },
+        "catalogueVersion": { "type": "string", "description": "Version of the canonical test catalogue used for alias resolution." },
+        "extractedAt": { "type": "string", "format": "date-time" },
+        "processingMs": { "type": "integer", "minimum": 0 },
+        "pagesProcessed": { "type": "integer", "minimum": 0 },
+        "linesRead": { "type": "integer", "minimum": 0, "description": "Non-empty text lines read off the document." },
+        "rowsDiscarded": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Value-bearing lines that matched no catalogue test: explanatory text, guideline tables, tests the app does not use. Counted, not kept."
+        },
+        "overallConfidence": { "$ref": "#/$defs/confidenceValue" }
+      }
+    },
+
+    "report": {
+      "type": "object",
+      "description": "Metadata read off the report itself. Every field here is OCR output and is therefore untrusted until validated.",
+      "additionalProperties": false,
+      "properties": {
+        "labName": { "type": ["string", "null"] },
+        "labAccreditation": { "type": ["string", "null"], "description": "NABL / CAP / ISO number where printed. Not verified by us.", "examples": ["NABL MC-2023"] },
+        "accessionId": { "type": ["string", "null"] },
+        "referringDoctor": { "type": ["string", "null"] },
+        "patientNameOnReport": { "type": ["string", "null"] },
+        "patientAgeOnReport": { "type": ["integer", "null"], "minimum": 0, "maximum": 130 },
+        "patientSexOnReport": { "type": ["string", "null"], "enum": ["male", "female", "other", null] },
+        "bloodGroupOnReport": { "type": ["string", "null"], "enum": ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-", null] },
+        "collectedAt": { "type": ["string", "null"], "format": "date-time", "description": "Specimen collection. Preferred date for every test on the report." },
+        "reportedAt": { "type": ["string", "null"], "format": "date-time" },
+        "panelsDetected": { "type": "array", "items": { "type": "string" }, "examples": [["lipid_profile", "hba1c"]] }
+      }
+    },
+
+    "identityMatch": {
+      "type": "object",
+      "description": "Does this report belong to the profile it was uploaded against? A mismatched report writing into someone's health record is the worst failure this pipeline can produce, and OCR of a name is not proof of identity.",
+      "additionalProperties": false,
+      "required": ["decision"],
+      "properties": {
+        "nameSimilarity": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "ageConsistent": { "type": ["boolean", "null"] },
+        "sexConsistent": { "type": ["boolean", "null"] },
+        "decision": { "type": "string", "enum": ["match", "uncertain", "mismatch", "not_checked"] },
+        "notes": { "type": ["string", "null"] }
+      }
+    },
+
+    "tests": {
+      "type": "array",
+      "description": "One entry per test row read from the report, including rows that failed validation. Nothing is silently dropped.",
+      "items": { "$ref": "#/$defs/labTest" }
+    },
+
+    "validation": {
+      "type": "object",
+      "description": "Document-level outcome, derived from the per-test results.",
+      "additionalProperties": false,
+      "required": ["status", "testsTotal", "testsPassed"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pass", "warn", "fail"] },
+        "testsTotal": { "type": "integer", "minimum": 0 },
+        "testsPassed": { "type": "integer", "minimum": 0 },
+        "testsWarned": { "type": "integer", "minimum": 0 },
+        "testsFailed": { "type": "integer", "minimum": 0 },
+        "documentChecks": { "type": "array", "items": { "$ref": "#/$defs/validationCheck" } }
+      }
+    },
+
+    "review": {
+      "type": "object",
+      "description": "Human confirmation. The pipeline never writes to the health record on its own.",
+      "additionalProperties": false,
+      "required": ["required", "state"],
+      "properties": {
+        "required": { "type": "boolean" },
+        "reason": { "type": ["string", "null"], "examples": ["identity_uncertain", "low_confidence", "implausible_value", "engine_relevant_value"] },
+        "state": { "type": "string", "enum": ["pending", "confirmed", "corrected", "rejected", "not_required"] },
+        "reviewer": { "type": ["string", "null"], "enum": ["user", "clinician", "admin", null] },
+        "reviewedAt": { "type": ["string", "null"], "format": "date-time" },
+        "corrections": {
+          "type": "array",
+          "description": "Every human edit, kept. This is the training and evaluation signal, and the audit record.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["canonicalId", "field", "from", "to"],
+            "properties": {
+              "canonicalId": { "type": "string" },
+              "field": { "type": "string" },
+              "from": {},
+              "to": {},
+              "correctedAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
+    },
+
+    "summary": {
+      "type": "object",
+      "description": "One-glance outcome for the app: how much of the assessment form the report filled, and what the user still has to provide.",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "fieldsTotal",
+        "fieldsRequired",
+        "filledFromReport",
+        "needsChecking",
+        "notFoundOnReport",
+        "needYourInput",
+        "requiredStillMissing"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "needs_input",
+            "ready_to_review"
+          ]
+        },
+        "fieldsTotal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fieldsRequired": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "filledFromReport": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "needsChecking": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "notFoundOnReport": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "needYourInput": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requiredStillMissing": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Form keys the form requires that are not yet filled."
+        }
+      }
+    },
+    "messages": {
+      "type": "array",
+      "description": "Plain-language messages to show the user, in order. level 'action' needs the user to do something; 'warning' needs attention; 'info' is for reassurance.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "level",
+          "code",
+          "text"
+        ],
+        "properties": {
+          "level": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "action"
+            ]
+          },
+          "code": {
+            "type": "string"
+          },
+          "field": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "form": {
+      "type": "object",
+      "description": "Every field of the assessment form, step by step, with what the report supplied and what is still needed.",
+      "additionalProperties": false,
+      "required": [
+        "steps"
+      ],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "step",
+              "title",
+              "fields"
+            ],
+            "properties": {
+              "step": {
+                "type": "integer"
+              },
+              "title": {
+                "type": "string"
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/formField"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "formPrefill": {
+      "type": ["object", "null"],
+      "description": "Shortcut over form: the filled values only, keyed by the form's own field names (tc, hdl, ldl, trig, hba1c, fbg, crp, egfr, age, sex) as strings. Only from tests that passed every check, agree across the report and sit inside the form's accepted range. The patient confirms or corrects them in the form, which then submits as it does today.",
+      "additionalProperties": false,
+      "required": ["fields", "sources", "skipped"],
+      "properties": {
+        "fields": { "type": "object", "additionalProperties": { "type": "string" } },
+        "sources": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": { "pageNumber": { "type": "integer" }, "lineNumber": { "type": "integer" }, "from": { "type": "string" }, "readAs": { "type": "string" } }
+          }
+        },
+        "skipped": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "intake": {
+      "type": "object",
+      "description": "Ready-to-send payloads for every place the app stores this data, plus context for the assistant. Nothing here is sent automatically: the app sends each part only after the user confirms it.",
+      "additionalProperties": false,
+      "required": [
+        "requiresConfirmation",
+        "profile",
+        "vitals",
+        "assessment",
+        "labResults",
+        "ragContext",
+        "notes",
+        "storage",
+        "familyProfile",
+        "unconfirmedResults",
+        "vitalsOnReport"
+      ],
+      "properties": {
+        "requiresConfirmation": {
+          "type": "boolean",
+          "const": true
+        },
+        "profile": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Body for PATCH /api/users/updateMe. Only fields the report supplied; the app should not overwrite values the user already set without asking.",
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {
+              "type": "string"
+            },
+            "body": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "profile": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "gender": {
+                      "type": "string",
+                      "enum": [
+                        "male",
+                        "female",
+                        "other"
+                      ]
+                    },
+                    "bloodGroup": {
+                      "type": "string",
+                      "enum": [
+                        "A+",
+                        "A-",
+                        "B+",
+                        "B-",
+                        "AB+",
+                        "AB-",
+                        "O+",
+                        "O-"
+                      ]
+                    },
+                    "height": {
+                      "type": "number"
+                    },
+                    "weight": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "vitals": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Body for POST /api/vitals (blood pressure and weight read off the report).",
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {
+              "type": "string"
+            },
+            "body": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "bloodPressure": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "systolic": {
+                      "type": "number"
+                    },
+                    "diastolic": {
+                      "type": "number"
+                    }
+                  }
+                },
+                "weight": {
+                  "type": "number"
+                },
+                "heartRate": {
+                  "type": "number"
+                },
+                "spo2": {
+                  "type": "number"
+                }
+              }
+            },
+            "measuredAt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "When the report says the readings were taken."
+            }
+          }
+        },
+        "assessment": {
+          "type": "object",
+          "description": "The filled assessment-form values, keyed exactly as the mobile and web forms, for POST /api/vitals/calculate-score once the user has completed the rest.",
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {
+              "type": "string"
+            },
+            "body": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "missingRequired": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "labResults": {
+          "type": "array",
+          "description": "Every catalogue test that passed validation, once each, with its collection date: the record to store and to give the assistant.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "test",
+              "name",
+              "value",
+              "unit"
+            ],
+            "properties": {
+              "test": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "qualifier": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "referenceRange": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "flag": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "collectedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "pageNumber": {
+                    "type": "integer"
+                  },
+                  "lineNumber": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "ragContext": {
+          "type": "object",
+          "description": "Short factual lines about this report for the assistant's user context. Values only, no interpretation.",
+          "additionalProperties": false,
+          "properties": {
+            "asOf": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "facts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "notes": {
+          "type": "array",
+          "description": "Gaps between this data and what the backend currently does with it.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "storage": {
+          "type": "object",
+          "description": "For every value on this report: which field it lands in, through which endpoint, and for whom.",
+          "additionalProperties": false,
+          "properties": {
+            "summary": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "item",
+                  "label",
+                  "value",
+                  "status",
+                  "stores"
+                ],
+                "properties": {
+                  "item": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "stored",
+                      "assessment_only",
+                      "raw_only",
+                      "derived_only",
+                      "no_store"
+                    ]
+                  },
+                  "note": {
+                    "type": "string"
+                  },
+                  "stores": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "via": {
+                          "type": "string"
+                        },
+                        "scope": {
+                          "type": "string",
+                          "enum": [
+                            "self",
+                            "family",
+                            "profile"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "familyProfile": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Body for PATCH /api/users/family/:profileId when the report belongs to a family member. Family profiles keep only name, relationship, date of birth, gender and avatar.",
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {
+              "type": "string"
+            },
+            "body": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "gender": {
+                  "type": "string",
+                  "enum": [
+                    "male",
+                    "female",
+                    "other"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "unconfirmedResults": {
+          "type": "array",
+          "description": "Values that were read but could not be confirmed (layout, unit or name in doubt, or two readings that disagree). Show them for the user to check; never store or use them unconfirmed.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "test",
+              "name",
+              "readAs",
+              "reason"
+            ],
+            "properties": {
+              "test": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "readAs": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "source": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "pageNumber": {
+                    "type": "integer"
+                  },
+                  "lineNumber": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "vitalsOnReport": {
+          "type": "object",
+          "description": "Vitals printed on the report that have no form field: heart rate, SpO2, temperature, BMI.",
+          "additionalProperties": false,
+          "properties": {
+            "heartRate": {
+              "type": "number"
+            },
+            "spo2": {
+              "type": "number"
+            },
+            "bmi": {
+              "type": "number"
+            },
+            "temperature": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "value": {
+                  "type": "number"
+                },
+                "unit": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "enginePayload": {
+      "type": ["object", "null"],
+      "description": "The subset written to CardioAssessment.assessmentData, populated ONLY after review.state is 'confirmed' or 'corrected' and only from tests with validation.status 'pass'. Null until then. Keys are dotted paths into the assessment model.",
+      "additionalProperties": false,
+      "properties": {
+        "assessmentData.demographics.age": { "type": ["integer", "null"], "description": "From the report header. Comprehensive health-check reports print it; standalone panels often do not." },
+        "assessmentData.demographics.sex": { "type": ["string", "null"], "enum": ["male", "female", "other", null] },
+        "assessmentData.anthropometry.height": { "type": ["number", "null"], "description": "Health-check packages only." },
+        "assessmentData.anthropometry.weight": { "type": ["number", "null"] },
+        "assessmentData.anthropometry.bmi": { "type": ["number", "null"] },
+        "assessmentData.bloodPressure.systolic": { "type": ["number", "null"], "description": "Health-check packages only. A single clinic reading, and it must be labelled as one." },
+        "assessmentData.bloodPressure.diastolic": { "type": ["number", "null"] },
+        "assessmentData.lipids.totalCholesterol": { "type": ["number", "null"] },
+        "assessmentData.lipids.ldl": { "type": ["number", "null"] },
+        "assessmentData.lipids.hdl": { "type": ["number", "null"] },
+        "assessmentData.glycaemic.hba1c": { "type": ["number", "null"] },
+        "assessmentData.glycaemic.fastingGlucose": { "type": ["number", "null"] },
+        "assessmentData.biomarkers.hscrp": { "type": ["number", "null"] },
+        "assessmentData.biomarkers.egfr": { "type": ["number", "null"] }
+      },
+      "x-note": "assessmentData.lipids has no triglycerides field, so extracted triglycerides cannot be written. The mobile assessment form collects the value and the backend discards it. See OCR_Lab_Report_Architecture.md section 11."
+    }
+  },
+
+  "$defs": {
+    "formField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "label",
+        "step",
+        "required",
+        "type",
+        "value",
+        "status"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "step": {
+          "type": "integer"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "number",
+            "choice",
+            "text"
+          ]
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Set only when status is 'filled'. A string, as the form's inputs hold it."
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "filled",
+            "check",
+            "not_found",
+            "ask_user",
+            "not_applicable"
+          ],
+          "description": "filled: taken from the report, patient confirms. check: found but could not be confirmed. not_found: a lab value missing from the report. ask_user: not something a lab report carries. not_applicable: hidden by the form for this patient."
+        },
+        "source": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "pageNumber": {
+              "type": "integer"
+            },
+            "lineNumber": {
+              "type": "integer"
+            },
+            "readAs": {
+              "type": "string"
+            }
+          }
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hint": {
+          "type": "string"
+        },
+        "range": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "value": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "showIf": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "conditional": {
+          "type": "string"
+        }
+      }
+    },
+    "confidenceValue": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "0 to 1. Engine-reported where the OCR engine supplies one; otherwise computed by the pipeline and labelled as such."
+    },
+
+    "labTest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw", "canonicalId", "value", "unit", "confidence", "validation"],
+      "properties": {
+        "raw": {
+          "type": "object",
+          "description": "Exactly what OCR read, before any normalisation. Kept verbatim so a reviewer can check the pipeline against the page, and so TEST-03 can score extraction separately from interpretation.",
+          "additionalProperties": false,
+          "required": ["nameText"],
+          "properties": {
+            "nameText": { "type": "string" },
+            "valueText": { "type": ["string", "null"] },
+            "unitText": { "type": ["string", "null"] },
+            "referenceText": { "type": ["string", "null"] },
+            "flagText": { "type": ["string", "null"], "examples": ["H", "L", "HIGH", "*"] },
+            "methodText": { "type": ["string", "null"], "examples": ["CLIA", "Enzymatic"] },
+            "pageNumber": { "type": ["integer", "null"], "minimum": 1 },
+            "lineNumber": { "type": ["integer", "null"] },
+            "boundingBox": {
+              "type": ["object", "null"],
+              "description": "Normalised 0-1 page coordinates, for highlighting the source row in the review UI.",
+              "additionalProperties": false,
+              "properties": {
+                "x": { "type": "number" }, "y": { "type": "number" },
+                "width": { "type": "number" }, "height": { "type": "number" }
+              }
+            }
+          }
+        },
+
+        "canonicalId": {
+          "type": ["string", "null"],
+          "description": "Key into x-canonicalTests. Null where the name could not be resolved; the row is kept with a NAME_UNRESOLVED check rather than discarded."
+        },
+        "displayName": { "type": ["string", "null"], "description": "Human-readable canonical name." },
+        "loinc": {
+          "type": ["string", "null"],
+          "description": "LOINC code. Deliberately unpopulated in v1.0.0 — every code must be verified against the LOINC release before it is written here, and a wrong code is worse than none. See architecture doc 9.2."
+        },
+
+        "value": { "type": ["number", "null"], "description": "Numeric value in the canonical unit." },
+        "unit": { "type": ["string", "null"], "description": "Canonical unit for this test, from the catalogue." },
+        "valueAsReported": {
+          "type": ["object", "null"],
+          "description": "Value and unit exactly as printed, retained when a conversion was applied.",
+          "additionalProperties": false,
+          "properties": {
+            "value": { "type": ["number", "null"] },
+            "unit": { "type": ["string", "null"] }
+          }
+        },
+        "conversion": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "from": { "type": "string" },
+            "to": { "type": "string" },
+            "method": { "type": "string", "enum": ["factor", "formula"] },
+            "factor": { "type": ["number", "null"] },
+            "formula": { "type": ["string", "null"] }
+          }
+        },
+
+        "qualifier": {
+          "type": ["string", "null"],
+          "enum": ["<", ">", "<=", ">=", null],
+          "description": "Censored results such as '<5' keep the operator here and the bound in value. Never silently coerced to the bound."
+        },
+
+        "referenceRange": {
+          "type": ["object", "null"],
+          "description": "ALWAYS taken from the report. PreventVital does not assert its own reference ranges — they vary by lab, method and population, and publishing our own is a clinical decision (architecture doc 9.1).",
+          "additionalProperties": false,
+          "properties": {
+            "low": { "type": ["number", "null"] },
+            "high": { "type": ["number", "null"] },
+            "unit": { "type": ["string", "null"] },
+            "text": { "type": ["string", "null"], "description": "Verbatim, for ranges that are not a simple interval (e.g. 'Desirable: <200')." },
+            "source": { "type": "string", "enum": ["report", "absent"] }
+          }
+        },
+
+        "abnormalFlag": {
+          "type": ["string", "null"],
+          "enum": ["low", "normal", "high", "critical_low", "critical_high", "unknown", null]
+        },
+        "abnormalFlagSource": {
+          "type": "string",
+          "enum": ["report", "derived_from_report_range", "none"],
+          "description": "'derived_from_report_range' means we compared the value to the range printed on the same report. We never derive a flag from a range we supplied."
+        },
+
+        "specimenCollectedAt": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Per-test where the report gives one, otherwise report.collectedAt. A test with no resolvable date carries DATE_MISSING and cannot reach the engine."
+        },
+
+        "confidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["overall"],
+          "properties": {
+            "ocr": { "$ref": "#/$defs/confidenceValue" },
+            "nameMatch": { "$ref": "#/$defs/confidenceValue" },
+            "valueParse": { "$ref": "#/$defs/confidenceValue" },
+            "overall": { "$ref": "#/$defs/confidenceValue" }
+          }
+        },
+
+        "validation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "checks"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["pass", "warn", "fail"],
+              "description": "fail = never reaches the engine under any circumstance. warn = reaches the engine only after human confirmation. pass = eligible, still subject to document-level review."
+            },
+            "checks": { "type": "array", "items": { "$ref": "#/$defs/validationCheck" } }
+          }
+        },
+
+        "engineField": {
+          "type": ["string", "null"],
+          "description": "Dotted path into CardioAssessment.assessmentData, or null where this test does not feed the engine."
+        },
+        "usedByEngine": { "type": "boolean", "default": false }
+      }
+    },
+
+    "validationCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "OCR_LOW_CONFIDENCE",
+            "NAME_UNRESOLVED",
+            "NAME_AMBIGUOUS",
+            "VALUE_UNPARSEABLE",
+            "VALUE_IMPLAUSIBLE",
+            "VALUE_ORDER_OF_MAGNITUDE_SUSPECT",
+            "DECIMAL_SEPARATOR_SUSPECT",
+            "UNIT_MISSING",
+            "UNIT_UNRECOGNISED",
+            "UNIT_NOT_VALID_FOR_TEST",
+            "UNIT_ASSUMED",
+            "REFERENCE_RANGE_MISSING",
+            "REFERENCE_RANGE_UNPARSEABLE",
+            "VALUE_OUTSIDE_REPORT_RANGE",
+            "FLAG_CONTRADICTS_VALUE",
+            "DUPLICATE_TEST",
+            "DUPLICATE_CONFLICTING",
+            "COLUMN_MISALIGNED",
+            "LAYOUT_UNCERTAIN",
+            "CONFIRMED_BY_SECOND_READING",
+            "DATE_MISSING",
+            "DATE_IN_FUTURE",
+            "DATE_STALE",
+            "PANEL_INCOMPLETE",
+            "IDENTITY_UNCERTAIN",
+            "IDENTITY_MISMATCH",
+            "CRITICAL_VALUE_DETECTED"
+          ]
+        },
+        "severity": { "type": "string", "enum": ["info", "warn", "fail"] },
+        "message": { "type": ["string", "null"] },
+        "detail": { "type": ["object", "null"], "additionalProperties": true }
+      }
+    }
+  },
+
+  "x-validationPolicy": {
+    "description": "Severity is fixed per code so the gate is deterministic and testable. TEST-03 asserts against this table.",
+    "fail": [
+      "VALUE_UNPARSEABLE",
+      "VALUE_IMPLAUSIBLE",
+      "UNIT_NOT_VALID_FOR_TEST",
+      "NAME_UNRESOLVED",
+      "DATE_IN_FUTURE",
+      "DUPLICATE_CONFLICTING",
+      "COLUMN_MISALIGNED",
+      "IDENTITY_MISMATCH"
+    ],
+    "warn": [
+      "OCR_LOW_CONFIDENCE",
+      "LAYOUT_UNCERTAIN",
+      "NAME_AMBIGUOUS",
+      "VALUE_ORDER_OF_MAGNITUDE_SUSPECT",
+      "DECIMAL_SEPARATOR_SUSPECT",
+      "UNIT_MISSING",
+      "UNIT_UNRECOGNISED",
+      "UNIT_ASSUMED",
+      "VALUE_OUTSIDE_REPORT_RANGE",
+      "FLAG_CONTRADICTS_VALUE",
+      "DATE_MISSING",
+      "DATE_STALE",
+      "IDENTITY_UNCERTAIN",
+      "CRITICAL_VALUE_DETECTED"
+    ],
+    "info": [
+      "CONFIRMED_BY_SECOND_READING",
+      "REFERENCE_RANGE_MISSING",
+      "REFERENCE_RANGE_UNPARSEABLE",
+      "DUPLICATE_TEST",
+      "PANEL_INCOMPLETE"
+    ],
+    "notes": [
+      "A test reaching the engine must have validation.status 'pass' AND document review.state in ['confirmed','corrected'].",
+      "CRITICAL_VALUE_DETECTED is a warn for the data pipeline but must also raise the AI-01 5.4 red-flag path. A lab value in crisis range is an emergency signal regardless of how it entered the system.",
+      "DATE_STALE threshold is a clinical decision, not ours. Placeholder: 12 months. See architecture doc question Q3."
+    ]
+  },
+
+  "x-canonicalTests": {
+    "description": "Alias catalogue, version 1.0.0. Aliases are matched case-insensitively after stripping punctuation, leading 'S.'/'Serum'/'Plasma'/'B.'/'Total', and whitespace. plausibilityBounds are wide data-quality bounds for catching OCR errors, NOT clinical reference ranges, and need clinical sign-off before use. Unit conversions are standard molecular-weight conversions and must be re-verified at review.",
+
+    "total_cholesterol": {
+      "displayName": "Total Cholesterol",
+      "aliases": ["total cholesterol", "cholesterol total", "cholesterol", "t.chol", "tc", "chol total", "cholesterol - total", "total chol"],
+      "canonicalUnit": "mg/dL",
+      "validUnits": ["mg/dL", "mmol/L"],
+      "conversions": { "mmol/L": { "method": "factor", "factor": 38.67 } },
+      "plausibilityBounds": { "low": 20, "high": 1000 },
+      "engineField": "assessmentData.lipids.totalCholesterol",
+      "formField": "tc",
+      "formRange": [50, 500],
+      "panel": "lipid_profile"
+    },
+    "hdl_cholesterol": {
+      "displayName": "HDL Cholesterol",
+      "aliases": ["hdl", "hdl cholesterol", "hdl-c", "high density lipoprotein", "hdl chol", "cholesterol hdl", "h.d.l", "hdl cholesterol direct", "direct hdl", "hdl direct"],
+      "canonicalUnit": "mg/dL",
+      "validUnits": ["mg/dL", "mmol/L"],
+      "conversions": { "mmol/L": { "method": "factor", "factor": 38.67 } },
+      "plausibilityBounds": { "low": 5, "high": 200 },
+      "engineField": "assessmentData.lipids.hdl",
+      "formField": "hdl",
+      "formRange": [10, 150],
+      "panel": "lipid_profile"
+    },
+    "ldl_cholesterol": {
+      "displayName": "LDL Cholesterol",
+      "aliases": ["ldl", "ldl cholesterol", "ldl-c", "low density lipoprotein", "ldl chol", "cholesterol ldl", "ldl cholesterol calculated", "l.d.l", "ldl cholesterol direct", "direct ldl", "ldl direct"],
+      "canonicalUnit": "mg/dL",
+      "validUnits": ["mg/dL", "mmol/L"],
+      "conversions": { "mmol/L": { "method": "factor", "factor": 38.67 } },
+      "plausibilityBounds": { "low": 5, "high": 800 },
+      "engineField": "assessmentData.lipids.ldl",
+      "formField": "ldl",
+      "formRange": [10, 400],
+      "panel": "lipid_profile",
+      "notes": "Many Indian reports print LDL as 'calculated' (Friedewald). Deriving LDL ourselves when it is absent is a clinical decision — see architecture doc Q2. v1.0.0 does not derive it."
+    },
+    "triglycerides": {
+      "displayName": "Triglycerides",
+      "aliases": ["triglycerides", "triglyceride", "tg", "tgl", "trig", "s. triglycerides"],
+      "canonicalUnit": "mg/dL",
+      "validUnits": ["mg/dL", "mmol/L"],
+      "conversions": { "mmol/L": { "method": "factor", "factor": 88.57 } },
+      "plausibilityBounds": { "low": 10, "high": 5000 },
+      "engineField": null,
+      "formField": "trig",
+      "formRange": [20, 2000],
+      "panel": "lipid_profile",
+      "notes": "On every lipid panel, but CardioAssessment.assessmentData.lipids has NO triglycerides field. Captured here and currently dropped at the engine boundary. Flagged in the architecture doc as a backend gap."
+    },
+    "hba1c": {
+      "displayName": "HbA1c",
+      "aliases": ["hba1c", "hb a1c", "a1c", "glycated haemoglobin", "glycated hemoglobin", "glycosylated haemoglobin", "glycosylated hemoglobin", "haemoglobin a1c", "hemoglobin a1c", "hba1c glycosylated hemoglobin", "hba1c glycated haemoglobin"],
+      "canonicalUnit": "%",
+      "validUnits": ["%", "mmol/mol"],
+      "conversions": { "mmol/mol": { "method": "formula", "formula": "ngsp_percent = 0.09148 * ifcc_mmol_per_mol + 2.152" } },
+      "plausibilityBounds": { "low": 2, "high": 20 },
+      "engineField": "assessmentData.glycaemic.hba1c",
+      "formField": "hba1c",
+      "formRange": [2, 20],
+      "panel": "hba1c",
+      "notes": "Unit ambiguity is the main hazard: an IFCC value of 53 read as 53% is a catastrophic misread. UNIT_MISSING on this test is always a warn, never assumed."
+    },
+    "fasting_glucose": {
+      "displayName": "Fasting Plasma Glucose",
+      "aliases": ["fasting glucose", "fasting blood sugar", "fbs", "glucose fasting", "fpg", "blood sugar fasting", "glucose - fasting", "sugar fasting", "fasting plasma glucose"],
+      "canonicalUnit": "mg/dL",
+      "validUnits": ["mg/dL", "mmol/L"],
+      "conversions": { "mmol/L": { "method": "factor", "factor": 18.016 } },
+      "plausibilityBounds": { "low": 10, "high": 1500 },
+      "engineField": "assessmentData.glycaemic.fastingGlucose",
+      "formField": "fbg",
+      "formRange": [40, 600],
+      "panel": "glucose",
+      "notes": "Do not conflate with random or post-prandial glucose. An alias match on bare 'glucose' or 'blood sugar' with no fasting qualifier is NAME_AMBIGUOUS, not a match."
+    },
+    "hs_crp": {
+      "displayName": "High-Sensitivity CRP",
+      "aliases": ["hs crp", "hscrp", "hs-crp", "high sensitivity crp", "high sensitivity c reactive protein", "crp high sensitivity", "c reactive protein hs"],
+      "canonicalUnit": "mg/L",
+      "validUnits": ["mg/L", "mg/dL"],
+      "conversions": { "mg/dL": { "method": "factor", "factor": 10 } },
+      "plausibilityBounds": { "low": 0, "high": 500 },
+      "engineField": "assessmentData.biomarkers.hscrp",
+      "formField": "crp",
+      "formRange": null,
+      "panel": "inflammation",
+      "notes": "Plain 'CRP' is a different assay with a different range and must not alias to hs-CRP. Plain CRP resolves to canonicalId 'crp' with engineField null."
+    },
+    "crp": {
+      "displayName": "C-Reactive Protein",
+      "aliases": ["crp", "c reactive protein", "c-reactive protein", "c reactive protein quantitative", "crp quantitative"],
+      "canonicalUnit": "mg/L",
+      "validUnits": ["mg/L", "mg/dL"],
+      "conversions": { "mg/dL": { "method": "factor", "factor": 10 } },
+      "plausibilityBounds": { "low": 0, "high": 500 },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "inflammation"
+    },
+    "egfr": {
+      "displayName": "eGFR",
+      "aliases": ["egfr", "e gfr", "estimated gfr", "estimated glomerular filtration rate", "gfr estimated", "gfr"],
+      "canonicalUnit": "mL/min/1.73m2",
+      "validUnits": ["mL/min/1.73m2"],
+      "conversions": {},
+      "plausibilityBounds": { "low": 1, "high": 200 },
+      "engineField": "assessmentData.biomarkers.egfr",
+      "formField": "egfr",
+      "formRange": null,
+      "panel": "renal",
+      "notes": "Record the estimating equation (CKD-EPI 2009, CKD-EPI 2021, MDRD) in raw.methodText where printed. They do not agree, and the 2021 equation removed the race coefficient."
+    },
+    "creatinine": {
+      "displayName": "Serum Creatinine",
+      "aliases": ["creatinine", "s. creatinine", "serum creatinine", "creat", "creatinine serum"],
+      "canonicalUnit": "mg/dL",
+      "validUnits": ["mg/dL", "umol/L"],
+      "conversions": { "umol/L": { "method": "factor", "factor": 0.011312, "note": "1 mg/dL = 88.4 umol/L" } },
+      "plausibilityBounds": { "low": 0.1, "high": 25 },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "renal"
+    },
+    "hemoglobin": {
+      "displayName": "Haemoglobin",
+      "aliases": ["hb", "hgb", "haemoglobin", "hemoglobin", "haemoglobin hb", "hb%"],
+      "canonicalUnit": "g/dL",
+      "validUnits": ["g/dL", "g/L"],
+      "conversions": { "g/L": { "method": "factor", "factor": 0.1 } },
+      "plausibilityBounds": { "low": 2, "high": 25 },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc",
+      "notes": "The assignment's worked example of alias normalisation. Not an engine input, but the highest-frequency test on Indian reports."
+    },
+    "urine_microalbumin": {
+      "displayName": "Urine Microalbumin",
+      "aliases": ["microalbumin", "micro albumin", "urine microalbumin", "urinary microalbumin", "microalbuminuria", "microalbumin albumin"],
+      "canonicalUnit": "mg/L",
+      "validUnits": ["mg/L", "mg/dL"],
+      "conversions": { "mg/dL": { "method": "factor", "factor": 10 } },
+      "plausibilityBounds": { "low": 0, "high": 3000 },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "renal",
+      "notes": "assessmentData.biomarkers.microalbuminuria is a STRING status, not a number, so no direct numeric mapping exists. Mapping a concentration to that status is a clinical decision — architecture doc Q2."
+    },
+    "urine_acr": {
+      "displayName": "Urine Albumin/Creatinine Ratio",
+      "aliases": ["acr", "albumin creatinine ratio", "urine albumin creatinine ratio", "uacr", "alb/creat ratio", "microalbumin albumin creatinine ratio", "microalbumin creatinine ratio"],
+      "canonicalUnit": "mg/g",
+      "validUnits": ["mg/g", "mg/mmol"],
+      "conversions": { "mg/mmol": { "method": "factor", "factor": 8.84 } },
+      "plausibilityBounds": { "low": 0, "high": 20000 },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "renal",
+      "notes": "Distinct from urine_microalbumin. A concentration and a ratio are not interchangeable and must never alias to each other."
+    },
+    "tsh": {
+      "displayName": "TSH",
+      "aliases": ["tsh", "thyroid stimulating hormone", "thyrotropin", "s. tsh", "thyroid stimulating hormone ultrasensitive", "thyroid stimulating hormone ultra sensitive", "tsh ultrasensitive"],
+      "canonicalUnit": "uIU/mL",
+      "validUnits": ["uIU/mL", "mIU/L"],
+      "conversions": { "mIU/L": { "method": "factor", "factor": 1, "note": "Numerically equivalent." } },
+      "plausibilityBounds": { "low": 0, "high": 200 },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "thyroid"
+    },
+    "vitamin_d": {
+      "displayName": "25-OH Vitamin D",
+      "aliases": ["vitamin d", "vit d", "25 oh vitamin d", "25-oh vitamin d", "25 hydroxy vitamin d", "vitamin d total", "vitamin d 25 hydroxy", "vitamin d 25 oh"],
+      "canonicalUnit": "ng/mL",
+      "validUnits": ["ng/mL", "nmol/L"],
+      "conversions": { "nmol/L": { "method": "factor", "factor": 0.4006, "note": "1 ng/mL = 2.496 nmol/L" } },
+      "plausibilityBounds": { "low": 0, "high": 300 },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "vitamins"
+    },
+    "rbc": {
+      "displayName": "RBC count",
+      "aliases": [
+        "rbc",
+        "rbc count",
+        "red blood cell count",
+        "red blood cells",
+        "rbc total count",
+        "erythrocyte count"
+      ],
+      "canonicalUnit": "10^6/uL",
+      "validUnits": [
+        "10^6/uL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 1,
+        "high": 9
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc"
+    },
+    "wbc": {
+      "displayName": "Total leucocyte count",
+      "aliases": [
+        "tlc",
+        "total leucocyte count",
+        "total leukocyte count",
+        "wbc",
+        "wbc count",
+        "wbc total count",
+        "white blood cell count",
+        "leucocyte count",
+        "leukocyte count"
+      ],
+      "canonicalUnit": "10^3/uL",
+      "validUnits": [
+        "10^3/uL",
+        "cells/uL"
+      ],
+      "conversions": {
+        "cells/uL": {
+          "method": "factor",
+          "factor": 0.001
+        }
+      },
+      "plausibilityBounds": {
+        "low": 0.5,
+        "high": 100
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc"
+    },
+    "platelets": {
+      "displayName": "Platelet count",
+      "aliases": [
+        "platelet count",
+        "platelets",
+        "plt",
+        "platelet",
+        "plt count"
+      ],
+      "canonicalUnit": "10^3/uL",
+      "validUnits": [
+        "10^3/uL",
+        "lakh/uL",
+        "cells/uL"
+      ],
+      "conversions": {
+        "lakh/uL": {
+          "method": "factor",
+          "factor": 100
+        },
+        "cells/uL": {
+          "method": "factor",
+          "factor": 0.001
+        }
+      },
+      "plausibilityBounds": {
+        "low": 5,
+        "high": 2000
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc"
+    },
+    "hematocrit": {
+      "displayName": "Haematocrit (PCV)",
+      "aliases": [
+        "hct",
+        "hematocrit",
+        "haematocrit",
+        "pcv",
+        "packed cell volume"
+      ],
+      "canonicalUnit": "%",
+      "validUnits": [
+        "%"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 10,
+        "high": 75
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc"
+    },
+    "mcv": {
+      "displayName": "MCV",
+      "aliases": [
+        "mcv",
+        "mean corpuscular volume",
+        "mean cell volume"
+      ],
+      "canonicalUnit": "fL",
+      "validUnits": [
+        "fL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 40,
+        "high": 150
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc"
+    },
+    "mch": {
+      "displayName": "MCH",
+      "aliases": [
+        "mch",
+        "mean corpuscular hemoglobin",
+        "mean corpuscular haemoglobin",
+        "mean cell hemoglobin"
+      ],
+      "canonicalUnit": "pg",
+      "validUnits": [
+        "pg"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 10,
+        "high": 60
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc"
+    },
+    "mchc": {
+      "displayName": "MCHC",
+      "aliases": [
+        "mchc",
+        "mean corpuscular hemoglobin concentration",
+        "mean corpuscular haemoglobin concentration",
+        "mean cell hemoglobin concentration"
+      ],
+      "canonicalUnit": "g/dL",
+      "validUnits": [
+        "g/dL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 20,
+        "high": 45
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc"
+    },
+    "rdw_cv": {
+      "displayName": "RDW-CV",
+      "aliases": [
+        "rdw",
+        "rdw cv",
+        "rdw-cv",
+        "red cell distribution width",
+        "red cell distribution width cv"
+      ],
+      "canonicalUnit": "%",
+      "validUnits": [
+        "%"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 5,
+        "high": 40
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc"
+    },
+    "neutrophils": {
+      "displayName": "Neutrophils",
+      "aliases": [
+        "neutrophils",
+        "neutrophil",
+        "polymorphs",
+        "neutrophils %"
+      ],
+      "canonicalUnit": "%",
+      "validUnits": [
+        "%"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0,
+        "high": 100
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc"
+    },
+    "lymphocytes": {
+      "displayName": "Lymphocytes",
+      "aliases": [
+        "lymphocytes",
+        "lymphocyte",
+        "lymphocytes %"
+      ],
+      "canonicalUnit": "%",
+      "validUnits": [
+        "%"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0,
+        "high": 100
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc"
+    },
+    "monocytes": {
+      "displayName": "Monocytes",
+      "aliases": [
+        "monocytes",
+        "monocyte",
+        "monocytes %"
+      ],
+      "canonicalUnit": "%",
+      "validUnits": [
+        "%"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0,
+        "high": 100
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc"
+    },
+    "eosinophils": {
+      "displayName": "Eosinophils",
+      "aliases": [
+        "eosinophils",
+        "eosinophil",
+        "eosinophils %"
+      ],
+      "canonicalUnit": "%",
+      "validUnits": [
+        "%"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0,
+        "high": 100
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc"
+    },
+    "basophils": {
+      "displayName": "Basophils",
+      "aliases": [
+        "basophils",
+        "basophil",
+        "basophils %"
+      ],
+      "canonicalUnit": "%",
+      "validUnits": [
+        "%"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0,
+        "high": 100
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "cbc"
+    },
+    "esr": {
+      "displayName": "ESR",
+      "aliases": [
+        "esr",
+        "erythrocyte sedimentation rate",
+        "sedimentation rate"
+      ],
+      "canonicalUnit": "mm/hr",
+      "validUnits": [
+        "mm/hr"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0,
+        "high": 150
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "inflammation"
+    },
+    "bilirubin_total": {
+      "displayName": "Total bilirubin",
+      "aliases": [
+        "bilirubin total",
+        "total bilirubin",
+        "bilirubin - total",
+        "bilirubin"
+      ],
+      "canonicalUnit": "mg/dL",
+      "validUnits": [
+        "mg/dL",
+        "umol/L"
+      ],
+      "conversions": {
+        "umol/L": {
+          "method": "factor",
+          "factor": 0.0585
+        }
+      },
+      "plausibilityBounds": {
+        "low": 0,
+        "high": 40
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "liver"
+    },
+    "bilirubin_direct": {
+      "displayName": "Direct bilirubin",
+      "aliases": [
+        "bilirubin direct",
+        "direct bilirubin",
+        "bilirubin - direct",
+        "conjugated bilirubin"
+      ],
+      "canonicalUnit": "mg/dL",
+      "validUnits": [
+        "mg/dL",
+        "umol/L"
+      ],
+      "conversions": {
+        "umol/L": {
+          "method": "factor",
+          "factor": 0.0585
+        }
+      },
+      "plausibilityBounds": {
+        "low": 0,
+        "high": 30
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "liver"
+    },
+    "bilirubin_indirect": {
+      "displayName": "Indirect bilirubin",
+      "aliases": [
+        "bilirubin indirect",
+        "indirect bilirubin",
+        "bilirubin - indirect",
+        "unconjugated bilirubin"
+      ],
+      "canonicalUnit": "mg/dL",
+      "validUnits": [
+        "mg/dL",
+        "umol/L"
+      ],
+      "conversions": {
+        "umol/L": {
+          "method": "factor",
+          "factor": 0.0585
+        }
+      },
+      "plausibilityBounds": {
+        "low": 0,
+        "high": 30
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "liver"
+    },
+    "ast": {
+      "displayName": "AST (SGOT)",
+      "aliases": [
+        "ast",
+        "sgot",
+        "aspartate transaminase",
+        "aspartate aminotransferase",
+        "ast sgot",
+        "sgot ast",
+        "aspartate transaminase sgot",
+        "aspartate aminotransferase ast",
+        "sgot aspartate transaminase",
+        "sgot aspartate aminotransferase"
+      ],
+      "canonicalUnit": "U/L",
+      "validUnits": [
+        "U/L"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 1,
+        "high": 10000
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "liver"
+    },
+    "alt": {
+      "displayName": "ALT (SGPT)",
+      "aliases": [
+        "alt",
+        "sgpt",
+        "alanine transaminase",
+        "alanine aminotransferase",
+        "alt sgpt",
+        "sgpt alt",
+        "alanine transaminase sgpt",
+        "alanine aminotransferase alt",
+        "sgpt alanine transaminase",
+        "sgpt alanine aminotransferase"
+      ],
+      "canonicalUnit": "U/L",
+      "validUnits": [
+        "U/L"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 1,
+        "high": 10000
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "liver"
+    },
+    "ast_alt_ratio": {
+      "displayName": "SGOT/SGPT ratio",
+      "aliases": [
+        "sgot sgpt",
+        "sgot/sgpt",
+        "sgot sgpt ratio",
+        "ast alt ratio",
+        "de ritis ratio"
+      ],
+      "canonicalUnit": "ratio",
+      "validUnits": [
+        "ratio"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0.1,
+        "high": 10
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "liver"
+    },
+    "alp": {
+      "displayName": "Alkaline phosphatase",
+      "aliases": [
+        "alp",
+        "alkaline phosphatase",
+        "alk phos",
+        "alkaline phosphatase alp"
+      ],
+      "canonicalUnit": "U/L",
+      "validUnits": [
+        "U/L"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 5,
+        "high": 5000
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "liver"
+    },
+    "ggt": {
+      "displayName": "GGT",
+      "aliases": [
+        "ggt",
+        "ggtp",
+        "gamma gt",
+        "gamma glutamyl transferase",
+        "gamma glutamyltransferase",
+        "gamma glutamyltransferase ggt",
+        "gamma glutamyl transpeptidase"
+      ],
+      "canonicalUnit": "U/L",
+      "validUnits": [
+        "U/L"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 1,
+        "high": 5000
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "liver"
+    },
+    "total_protein": {
+      "displayName": "Total protein",
+      "aliases": [
+        "total protein",
+        "protein total",
+        "total proteins",
+        "protein"
+      ],
+      "canonicalUnit": "g/dL",
+      "validUnits": [
+        "g/dL",
+        "g/L"
+      ],
+      "conversions": {
+        "g/L": {
+          "method": "factor",
+          "factor": 0.1
+        }
+      },
+      "plausibilityBounds": {
+        "low": 2,
+        "high": 15
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "liver"
+    },
+    "albumin": {
+      "displayName": "Albumin",
+      "aliases": [
+        "albumin",
+        "serum albumin",
+        "s. albumin"
+      ],
+      "canonicalUnit": "g/dL",
+      "validUnits": [
+        "g/dL",
+        "g/L"
+      ],
+      "conversions": {
+        "g/L": {
+          "method": "factor",
+          "factor": 0.1
+        }
+      },
+      "plausibilityBounds": {
+        "low": 1,
+        "high": 7
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "liver"
+    },
+    "globulin": {
+      "displayName": "Globulin",
+      "aliases": [
+        "globulin",
+        "serum globulin"
+      ],
+      "canonicalUnit": "g/dL",
+      "validUnits": [
+        "g/dL",
+        "g/L"
+      ],
+      "conversions": {
+        "g/L": {
+          "method": "factor",
+          "factor": 0.1
+        }
+      },
+      "plausibilityBounds": {
+        "low": 0.5,
+        "high": 10
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "liver"
+    },
+    "ag_ratio": {
+      "displayName": "Albumin/globulin ratio",
+      "aliases": [
+        "a/g ratio",
+        "a g ratio",
+        "albumin globulin ratio",
+        "albumin/globulin ratio"
+      ],
+      "canonicalUnit": "ratio",
+      "validUnits": [
+        "ratio"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0.1,
+        "high": 5
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "liver"
+    },
+    "urea": {
+      "displayName": "Urea",
+      "aliases": [
+        "urea",
+        "blood urea",
+        "serum urea",
+        "s. urea"
+      ],
+      "canonicalUnit": "mg/dL",
+      "validUnits": [
+        "mg/dL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 2,
+        "high": 400
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "renal"
+    },
+    "bun": {
+      "displayName": "Blood urea nitrogen",
+      "aliases": [
+        "bun",
+        "blood urea nitrogen",
+        "urea nitrogen"
+      ],
+      "canonicalUnit": "mg/dL",
+      "validUnits": [
+        "mg/dL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 1,
+        "high": 200
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "renal"
+    },
+    "bun_creatinine_ratio": {
+      "displayName": "BUN/Creatinine ratio",
+      "aliases": [
+        "bun creatinine ratio",
+        "bun/creatinine ratio",
+        "urea nitrogen creatinine ratio"
+      ],
+      "canonicalUnit": "ratio",
+      "validUnits": [
+        "ratio"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 1,
+        "high": 100
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "renal"
+    },
+    "uric_acid": {
+      "displayName": "Uric acid",
+      "aliases": [
+        "uric acid",
+        "serum uric acid",
+        "s. uric acid"
+      ],
+      "canonicalUnit": "mg/dL",
+      "validUnits": [
+        "mg/dL",
+        "umol/L"
+      ],
+      "conversions": {
+        "umol/L": {
+          "method": "factor",
+          "factor": 0.0168
+        }
+      },
+      "plausibilityBounds": {
+        "low": 0.5,
+        "high": 25
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "renal"
+    },
+    "sodium": {
+      "displayName": "Sodium",
+      "aliases": [
+        "sodium",
+        "na",
+        "na+",
+        "serum sodium",
+        "s. sodium"
+      ],
+      "canonicalUnit": "mmol/L",
+      "validUnits": [
+        "mmol/L",
+        "mEq/L"
+      ],
+      "conversions": {
+        "mEq/L": {
+          "method": "factor",
+          "factor": 1
+        }
+      },
+      "plausibilityBounds": {
+        "low": 100,
+        "high": 200
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "electrolytes"
+    },
+    "potassium": {
+      "displayName": "Potassium",
+      "aliases": [
+        "potassium",
+        "k",
+        "k+",
+        "serum potassium",
+        "s. potassium"
+      ],
+      "canonicalUnit": "mmol/L",
+      "validUnits": [
+        "mmol/L",
+        "mEq/L"
+      ],
+      "conversions": {
+        "mEq/L": {
+          "method": "factor",
+          "factor": 1
+        }
+      },
+      "plausibilityBounds": {
+        "low": 1,
+        "high": 10
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "electrolytes"
+    },
+    "chloride": {
+      "displayName": "Chloride",
+      "aliases": [
+        "chloride",
+        "cl",
+        "cl-",
+        "serum chloride",
+        "s. chloride"
+      ],
+      "canonicalUnit": "mmol/L",
+      "validUnits": [
+        "mmol/L",
+        "mEq/L"
+      ],
+      "conversions": {
+        "mEq/L": {
+          "method": "factor",
+          "factor": 1
+        }
+      },
+      "plausibilityBounds": {
+        "low": 60,
+        "high": 150
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "electrolytes"
+    },
+    "calcium": {
+      "displayName": "Calcium",
+      "aliases": [
+        "calcium",
+        "serum calcium",
+        "s. calcium",
+        "calcium total"
+      ],
+      "canonicalUnit": "mg/dL",
+      "validUnits": [
+        "mg/dL",
+        "mmol/L"
+      ],
+      "conversions": {
+        "mmol/L": {
+          "method": "factor",
+          "factor": 4.008
+        }
+      },
+      "plausibilityBounds": {
+        "low": 3,
+        "high": 20
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "bone"
+    },
+    "phosphorus": {
+      "displayName": "Phosphorus",
+      "aliases": [
+        "phosphorus",
+        "inorganic phosphorus",
+        "serum phosphorus",
+        "phosphate"
+      ],
+      "canonicalUnit": "mg/dL",
+      "validUnits": [
+        "mg/dL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0.5,
+        "high": 15
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "bone"
+    },
+    "vldl": {
+      "displayName": "VLDL cholesterol",
+      "aliases": [
+        "vldl",
+        "vldl cholesterol",
+        "cholesterol vldl",
+        "very low density lipoprotein"
+      ],
+      "canonicalUnit": "mg/dL",
+      "validUnits": [
+        "mg/dL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 1,
+        "high": 500
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "lipid_profile"
+    },
+    "non_hdl": {
+      "displayName": "Non-HDL cholesterol",
+      "aliases": [
+        "non hdl cholesterol",
+        "non-hdl cholesterol",
+        "non hdl",
+        "cholesterol non hdl"
+      ],
+      "canonicalUnit": "mg/dL",
+      "validUnits": [
+        "mg/dL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 10,
+        "high": 700
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "lipid_profile"
+    },
+    "tc_hdl_ratio": {
+      "displayName": "Total cholesterol/HDL ratio",
+      "aliases": [
+        "cholesterol hdl cholesterol",
+        "total cholesterol hdl ratio",
+        "tc hdl ratio",
+        "cholesterol hdl ratio",
+        "chol hdl ratio"
+      ],
+      "canonicalUnit": "ratio",
+      "validUnits": [
+        "ratio"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0.5,
+        "high": 20
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "lipid_profile"
+    },
+    "ldl_hdl_ratio": {
+      "displayName": "LDL/HDL ratio",
+      "aliases": [
+        "ldl hdl cholesterol",
+        "ldl hdl ratio",
+        "ldl/hdl ratio",
+        "ldl cholesterol hdl cholesterol"
+      ],
+      "canonicalUnit": "ratio",
+      "validUnits": [
+        "ratio"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0.2,
+        "high": 15
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "lipid_profile"
+    },
+    "pp_glucose": {
+      "displayName": "Post-prandial glucose",
+      "aliases": [
+        "post prandial glucose",
+        "postprandial glucose",
+        "glucose pp",
+        "ppbs",
+        "glucose post prandial",
+        "post prandial blood sugar",
+        "blood sugar pp",
+        "pp blood sugar",
+        "glucose postprandial"
+      ],
+      "canonicalUnit": "mg/dL",
+      "validUnits": [
+        "mg/dL",
+        "mmol/L"
+      ],
+      "conversions": {
+        "mmol/L": {
+          "method": "factor",
+          "factor": 18.016
+        }
+      },
+      "plausibilityBounds": {
+        "low": 20,
+        "high": 1000
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "glucose"
+    },
+    "random_glucose": {
+      "displayName": "Random glucose",
+      "aliases": [
+        "random glucose",
+        "random blood sugar",
+        "rbs",
+        "glucose random",
+        "blood sugar random"
+      ],
+      "canonicalUnit": "mg/dL",
+      "validUnits": [
+        "mg/dL",
+        "mmol/L"
+      ],
+      "conversions": {
+        "mmol/L": {
+          "method": "factor",
+          "factor": 18.016
+        }
+      },
+      "plausibilityBounds": {
+        "low": 20,
+        "high": 1000
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "glucose"
+    },
+    "eag": {
+      "displayName": "Estimated average glucose",
+      "aliases": [
+        "estimated average glucose",
+        "eag",
+        "estimated average glucose eag",
+        "average blood glucose"
+      ],
+      "canonicalUnit": "mg/dL",
+      "validUnits": [
+        "mg/dL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 30,
+        "high": 600
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "hba1c"
+    },
+    "t3_total": {
+      "displayName": "T3 (total)",
+      "aliases": [
+        "t3",
+        "total t3",
+        "t3 total",
+        "triiodothyronine",
+        "triiodothyronine t3"
+      ],
+      "canonicalUnit": "ng/mL",
+      "validUnits": [
+        "ng/mL",
+        "ng/dL"
+      ],
+      "conversions": {
+        "ng/dL": {
+          "method": "factor",
+          "factor": 0.01
+        }
+      },
+      "plausibilityBounds": {
+        "low": 0.1,
+        "high": 10
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "thyroid"
+    },
+    "t4_total": {
+      "displayName": "T4 (total)",
+      "aliases": [
+        "t4",
+        "total t4",
+        "t4 total",
+        "thyroxine",
+        "thyroxine t4"
+      ],
+      "canonicalUnit": "ug/dL",
+      "validUnits": [
+        "ug/dL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0.5,
+        "high": 30
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "thyroid"
+    },
+    "ft3": {
+      "displayName": "Free T3",
+      "aliases": [
+        "free t3",
+        "ft3",
+        "free triiodothyronine"
+      ],
+      "canonicalUnit": "pg/mL",
+      "validUnits": [
+        "pg/mL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0.5,
+        "high": 30
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "thyroid"
+    },
+    "ft4": {
+      "displayName": "Free T4",
+      "aliases": [
+        "free t4",
+        "ft4",
+        "free thyroxine"
+      ],
+      "canonicalUnit": "ng/dL",
+      "validUnits": [
+        "ng/dL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0.1,
+        "high": 10
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "thyroid"
+    },
+    "vitamin_b12": {
+      "displayName": "Vitamin B12",
+      "aliases": [
+        "vitamin b12",
+        "vit b12",
+        "b12",
+        "cyanocobalamin",
+        "cobalamin",
+        "vitamin b12 cyanocobalamin"
+      ],
+      "canonicalUnit": "pg/mL",
+      "validUnits": [
+        "pg/mL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 20,
+        "high": 5000
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "vitamins"
+    },
+    "folate": {
+      "displayName": "Folate (vitamin B9)",
+      "aliases": [
+        "folate",
+        "folic acid",
+        "vitamin b9",
+        "vitamin b9 folic acid",
+        "serum folate",
+        "b9"
+      ],
+      "canonicalUnit": "ng/mL",
+      "validUnits": [
+        "ng/mL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0.5,
+        "high": 50
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "vitamins"
+    },
+    "iron": {
+      "displayName": "Serum iron",
+      "aliases": [
+        "iron",
+        "serum iron",
+        "iron serum",
+        "s. iron"
+      ],
+      "canonicalUnit": "ug/dL",
+      "validUnits": [
+        "ug/dL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 5,
+        "high": 500
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "iron"
+    },
+    "tibc": {
+      "displayName": "TIBC",
+      "aliases": [
+        "tibc",
+        "total iron binding capacity",
+        "iron binding capacity",
+        "total iron binding capacity tibc"
+      ],
+      "canonicalUnit": "ug/dL",
+      "validUnits": [
+        "ug/dL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 50,
+        "high": 1000
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "iron"
+    },
+    "uibc": {
+      "displayName": "UIBC",
+      "aliases": [
+        "uibc",
+        "unsaturated iron binding capacity",
+        "unsaturated iron binding capacity uibc"
+      ],
+      "canonicalUnit": "ug/dL",
+      "validUnits": [
+        "ug/dL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 10,
+        "high": 1000
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "iron"
+    },
+    "transferrin_saturation": {
+      "displayName": "Transferrin saturation",
+      "aliases": [
+        "transferrin saturation",
+        "tsat",
+        "iron saturation",
+        "percent saturation"
+      ],
+      "canonicalUnit": "%",
+      "validUnits": [
+        "%"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 1,
+        "high": 100
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "iron"
+    },
+    "ferritin": {
+      "displayName": "Ferritin",
+      "aliases": [
+        "ferritin",
+        "serum ferritin",
+        "s. ferritin"
+      ],
+      "canonicalUnit": "ng/mL",
+      "validUnits": [
+        "ng/mL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 1,
+        "high": 10000
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "iron"
+    },
+    "rheumatoid_factor": {
+      "displayName": "Rheumatoid factor",
+      "aliases": [
+        "rheumatoid factor",
+        "ra factor",
+        "rf",
+        "rheumatoid factor quantitative"
+      ],
+      "canonicalUnit": "IU/mL",
+      "validUnits": [
+        "IU/mL"
+      ],
+      "conversions": {},
+      "plausibilityBounds": {
+        "low": 0,
+        "high": 2000
+      },
+      "engineField": null,
+      "formField": null,
+      "formRange": null,
+      "panel": "immunology"
+    }
+  },
+
+  "x-assessmentForm": {
+    "description": "The app's VITAL Score assessment form (mobile CardioAssessmentScreen), field for field: key, label, step, input type, whether the form requires it, unit, the range the form accepts, options, and where a value can come from. source.test = a catalogue test; source.header = a field read off the report header; source.vital = a labelled vital printed on the report; null = only the user can answer. Keep in step with the app.",
+    "steps": [
+      {
+        "step": 1,
+        "title": "About You"
+      },
+      {
+        "step": 2,
+        "title": "Body Measurements"
+      },
+      {
+        "step": 3,
+        "title": "Blood Pressure"
+      },
+      {
+        "step": 4,
+        "title": "Cholesterol"
+      },
+      {
+        "step": 5,
+        "title": "Blood Sugar"
+      },
+      {
+        "step": 6,
+        "title": "Heart History"
+      },
+      {
+        "step": 7,
+        "title": "Lifestyle"
+      },
+      {
+        "step": 8,
+        "title": "Other Blood Tests"
+      },
+      {
+        "step": 9,
+        "title": "Heart and Organ Scans"
+      }
+    ],
+    "fields": [
+      {
+        "key": "age",
+        "label": "Age",
+        "step": 1,
+        "type": "number",
+        "required": true,
+        "unit": "years",
+        "range": [
+          18,
+          100
+        ],
+        "source": {
+          "header": "patientAgeOnReport"
+        },
+        "question": "How old are you?"
+      },
+      {
+        "key": "sex",
+        "label": "Biological sex",
+        "step": 1,
+        "type": "choice",
+        "required": true,
+        "options": [
+          {
+            "value": "male",
+            "label": "Male"
+          },
+          {
+            "value": "female",
+            "label": "Female"
+          },
+          {
+            "value": "other",
+            "label": "Prefer not to say"
+          }
+        ],
+        "source": {
+          "header": "patientSexOnReport"
+        },
+        "question": "What is your biological sex?"
+      },
+      {
+        "key": "menopause",
+        "label": "Menopausal status",
+        "step": 1,
+        "type": "choice",
+        "required": false,
+        "options": [
+          {
+            "value": "pre",
+            "label": "Pre-menopausal"
+          },
+          {
+            "value": "post",
+            "label": "Post-menopausal"
+          }
+        ],
+        "source": null,
+        "showIf": {
+          "sex": "female"
+        },
+        "question": "What is your menopausal status?"
+      },
+      {
+        "key": "country",
+        "label": "Country of residence",
+        "step": 1,
+        "type": "text",
+        "required": false,
+        "source": null,
+        "question": "Which country do you live in?"
+      },
+      {
+        "key": "height",
+        "label": "Height",
+        "step": 2,
+        "type": "number",
+        "required": true,
+        "unit": "cm",
+        "range": [
+          100,
+          250
+        ],
+        "source": {
+          "vital": "height"
+        },
+        "question": "What is your height in cm?"
+      },
+      {
+        "key": "weight",
+        "label": "Weight",
+        "step": 2,
+        "type": "number",
+        "required": true,
+        "unit": "kg",
+        "range": [
+          20,
+          300
+        ],
+        "source": {
+          "vital": "weight"
+        },
+        "question": "What is your weight in kg?"
+      },
+      {
+        "key": "waist",
+        "label": "Waist",
+        "step": 2,
+        "type": "number",
+        "required": true,
+        "unit": "cm",
+        "source": {
+          "vital": "waist"
+        },
+        "question": "What is your waist measurement in cm?"
+      },
+      {
+        "key": "hip",
+        "label": "Hip",
+        "step": 2,
+        "type": "number",
+        "required": false,
+        "unit": "cm",
+        "source": null,
+        "question": "What is your hip measurement in cm?"
+      },
+      {
+        "key": "neck",
+        "label": "Neck circumference",
+        "step": 2,
+        "type": "number",
+        "required": false,
+        "unit": "cm",
+        "source": null,
+        "question": "What is your neck circumference in cm?"
+      },
+      {
+        "key": "bodyFat",
+        "label": "Body fat",
+        "step": 2,
+        "type": "number",
+        "required": false,
+        "unit": "%",
+        "source": null,
+        "question": "Do you know your body fat percentage? The app can estimate it from height, waist, neck and hip."
+      },
+      {
+        "key": "sbp",
+        "label": "Systolic blood pressure",
+        "step": 3,
+        "type": "number",
+        "required": true,
+        "unit": "mmHg",
+        "range": [
+          50,
+          300
+        ],
+        "source": {
+          "vital": "sbp"
+        },
+        "question": "What is your systolic (top) blood pressure?"
+      },
+      {
+        "key": "dbp",
+        "label": "Diastolic blood pressure",
+        "step": 3,
+        "type": "number",
+        "required": false,
+        "unit": "mmHg",
+        "range": [
+          30,
+          200
+        ],
+        "source": {
+          "vital": "dbp"
+        },
+        "question": "What is your diastolic (bottom) blood pressure?"
+      },
+      {
+        "key": "htnStatus",
+        "label": "Hypertension status",
+        "step": 3,
+        "type": "choice",
+        "required": true,
+        "options": [
+          {
+            "value": "none",
+            "label": "No hypertension"
+          },
+          {
+            "value": "controlled",
+            "label": "Controlled"
+          },
+          {
+            "value": "uncontrolled",
+            "label": "Uncontrolled"
+          },
+          {
+            "value": "resistant",
+            "label": "Resistant"
+          }
+        ],
+        "source": null,
+        "question": "Have you been told you have high blood pressure?"
+      },
+      {
+        "key": "bpMeds",
+        "label": "On BP medication",
+        "step": 3,
+        "type": "choice",
+        "required": true,
+        "options": [
+          {
+            "value": "no",
+            "label": "No"
+          },
+          {
+            "value": "yes",
+            "label": "Yes"
+          }
+        ],
+        "source": null,
+        "question": "Do you take blood pressure medication?"
+      },
+      {
+        "key": "bpNumMeds",
+        "label": "Number of BP medications",
+        "step": 3,
+        "type": "choice",
+        "required": false,
+        "options": [
+          {
+            "value": "1",
+            "label": "1"
+          },
+          {
+            "value": "2",
+            "label": "2"
+          },
+          {
+            "value": "3",
+            "label": "3+"
+          }
+        ],
+        "source": null,
+        "showIf": {
+          "bpMeds": "yes"
+        },
+        "question": "How many blood pressure medicines do you take?"
+      },
+      {
+        "key": "tc",
+        "label": "Total cholesterol",
+        "step": 4,
+        "type": "number",
+        "required": true,
+        "unit": "mg/dL",
+        "range": [
+          50,
+          500
+        ],
+        "source": {
+          "test": "total_cholesterol"
+        },
+        "uploadHint": "a lipid profile report"
+      },
+      {
+        "key": "ldl",
+        "label": "LDL cholesterol",
+        "step": 4,
+        "type": "number",
+        "required": false,
+        "unit": "mg/dL",
+        "range": [
+          10,
+          400
+        ],
+        "source": {
+          "test": "ldl_cholesterol"
+        },
+        "uploadHint": "a lipid profile report"
+      },
+      {
+        "key": "hdl",
+        "label": "HDL cholesterol",
+        "step": 4,
+        "type": "number",
+        "required": true,
+        "unit": "mg/dL",
+        "range": [
+          10,
+          150
+        ],
+        "source": {
+          "test": "hdl_cholesterol"
+        },
+        "uploadHint": "a lipid profile report"
+      },
+      {
+        "key": "trig",
+        "label": "Triglycerides",
+        "step": 4,
+        "type": "number",
+        "required": false,
+        "unit": "mg/dL",
+        "range": [
+          20,
+          2000
+        ],
+        "source": {
+          "test": "triglycerides"
+        },
+        "uploadHint": "a lipid profile report"
+      },
+      {
+        "key": "dmStatus",
+        "label": "Diabetes status",
+        "step": 5,
+        "type": "choice",
+        "required": true,
+        "options": [
+          {
+            "value": "none",
+            "label": "No diabetes"
+          },
+          {
+            "value": "pre",
+            "label": "Pre-diabetes"
+          },
+          {
+            "value": "t2dm",
+            "label": "Type 2 diabetes"
+          },
+          {
+            "value": "t1dm",
+            "label": "Type 1 diabetes"
+          }
+        ],
+        "source": null,
+        "question": "Have you been diagnosed with diabetes or pre-diabetes?"
+      },
+      {
+        "key": "hba1c",
+        "label": "HbA1c",
+        "step": 5,
+        "type": "number",
+        "required": false,
+        "unit": "%",
+        "range": [
+          2,
+          20
+        ],
+        "source": {
+          "test": "hba1c"
+        },
+        "uploadHint": "an HbA1c report"
+      },
+      {
+        "key": "fbg",
+        "label": "Fasting glucose",
+        "step": 5,
+        "type": "number",
+        "required": false,
+        "unit": "mg/dL",
+        "range": [
+          40,
+          600
+        ],
+        "source": {
+          "test": "fasting_glucose"
+        },
+        "uploadHint": "a fasting blood sugar report"
+      },
+      {
+        "key": "cvdHist",
+        "label": "Prior cardiovascular event",
+        "step": 6,
+        "type": "choice",
+        "required": true,
+        "options": [
+          {
+            "value": "none",
+            "label": "No prior CVD"
+          },
+          {
+            "value": "yes",
+            "label": "Established CVD"
+          }
+        ],
+        "source": null,
+        "question": "Have you had a heart attack, stroke or other heart or blood-vessel disease?"
+      },
+      {
+        "key": "fhCvd",
+        "label": "Premature family history of CVD",
+        "step": 6,
+        "type": "choice",
+        "required": true,
+        "options": [
+          {
+            "value": "no",
+            "label": "No / Unknown"
+          },
+          {
+            "value": "1",
+            "label": "Yes (1 relative)"
+          },
+          {
+            "value": "2",
+            "label": "Yes (2 or more relatives)"
+          }
+        ],
+        "source": null,
+        "question": "Has a close relative had heart disease at a young age?"
+      },
+      {
+        "key": "smoking",
+        "label": "Smoking status",
+        "step": 7,
+        "type": "choice",
+        "required": true,
+        "options": [
+          {
+            "value": "never",
+            "label": "Never smoked"
+          },
+          {
+            "value": "former",
+            "label": "Former smoker"
+          },
+          {
+            "value": "current",
+            "label": "Current smoker"
+          }
+        ],
+        "source": null,
+        "question": "Do you smoke?"
+      },
+      {
+        "key": "alcohol",
+        "label": "Alcohol consumption",
+        "step": 7,
+        "type": "choice",
+        "required": true,
+        "options": [
+          {
+            "value": "low",
+            "label": "None / Occasional"
+          },
+          {
+            "value": "moderate",
+            "label": "Moderate (<14 units/week)"
+          },
+          {
+            "value": "heavy",
+            "label": "Heavy (14+ units/week)"
+          }
+        ],
+        "source": null,
+        "question": "How much alcohol do you drink?"
+      },
+      {
+        "key": "activity",
+        "label": "Physical activity",
+        "step": 7,
+        "type": "choice",
+        "required": true,
+        "options": [
+          {
+            "value": "active",
+            "label": "Active (150+ min/week)"
+          },
+          {
+            "value": "insufficient",
+            "label": "Insufficient (<150 min/week)"
+          },
+          {
+            "value": "sedentary",
+            "label": "Sedentary"
+          }
+        ],
+        "source": null,
+        "question": "How active are you?"
+      },
+      {
+        "key": "diet",
+        "label": "Diet quality",
+        "step": 7,
+        "type": "choice",
+        "required": true,
+        "options": [
+          {
+            "value": "healthy",
+            "label": "Healthy (Mediterranean/DASH)"
+          },
+          {
+            "value": "average",
+            "label": "Average"
+          },
+          {
+            "value": "poor",
+            "label": "Poor (high fat/sugar)"
+          }
+        ],
+        "source": null,
+        "question": "How would you describe your diet?"
+      },
+      {
+        "key": "crp",
+        "label": "High-sensitivity CRP",
+        "step": 8,
+        "type": "number",
+        "required": false,
+        "unit": "mg/L",
+        "source": {
+          "test": "hs_crp"
+        },
+        "uploadHint": "an hs-CRP report"
+      },
+      {
+        "key": "egfr",
+        "label": "Estimated GFR",
+        "step": 8,
+        "type": "number",
+        "required": false,
+        "unit": "mL/min/1.73m2",
+        "source": {
+          "test": "egfr"
+        },
+        "uploadHint": "a kidney function report that includes eGFR"
+      },
+      {
+        "key": "microalbumin",
+        "label": "Microalbuminuria",
+        "step": 8,
+        "type": "choice",
+        "required": false,
+        "options": [
+          {
+            "value": "negative",
+            "label": "Negative / Normal"
+          },
+          {
+            "value": "positive",
+            "label": "Positive (30-300 mg/g)"
+          }
+        ],
+        "source": null,
+        "question": "Has a urine test shown microalbumin? Check your urine ACR result."
+      },
+      {
+        "key": "lvh",
+        "label": "Left ventricular hypertrophy (LVH)",
+        "step": 9,
+        "type": "choice",
+        "required": false,
+        "options": [
+          {
+            "value": "no",
+            "label": "No"
+          },
+          {
+            "value": "yes",
+            "label": "Yes"
+          }
+        ],
+        "source": null,
+        "question": "Has an ECG or echo shown left ventricular hypertrophy?"
+      },
+      {
+        "key": "plaque",
+        "label": "Carotid plaque / IMT over 0.9 mm",
+        "step": 9,
+        "type": "choice",
+        "required": false,
+        "options": [
+          {
+            "value": "no",
+            "label": "No"
+          },
+          {
+            "value": "yes",
+            "label": "Yes"
+          }
+        ],
+        "source": null,
+        "question": "Has a neck ultrasound shown carotid plaque?"
+      },
+      {
+        "key": "abi",
+        "label": "Ankle-brachial index",
+        "step": 9,
+        "type": "choice",
+        "required": false,
+        "options": [
+          {
+            "value": "normal",
+            "label": "Normal (0.9 or more)"
+          },
+          {
+            "value": "abnormal",
+            "label": "Abnormal (below 0.9)"
+          }
+        ],
+        "source": null,
+        "question": "Do you know your ankle-brachial index result?"
+      }
+    ]
+  },
+  "x-storageMap": {
+    "description": "Where each value is kept in the PreventVital backend today (GitHub master 5464dbe, 8 Oct 2026). status: stored = has a field of its own; assessment_only = kept only inside a submitted CardioAssessment; raw_only = kept only in CardioAssessment.rawFormData and never scored; derived_only = only a category derived from it is kept; no_store = nowhere. scope: self = the account holder only; family = a family profile; profile = whichever profile is active (X-Profile-Id header).",
+    "items": {
+      "sex": {
+        "status": "stored",
+        "stores": [
+          {
+            "path": "User.profile.gender",
+            "via": "PATCH /api/users/updateMe",
+            "scope": "self"
+          },
+          {
+            "path": "User.familyProfiles[].gender",
+            "via": "PATCH /api/users/family/:profileId",
+            "scope": "family"
+          },
+          {
+            "path": "CardioAssessment.assessmentData.demographics.sex",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "age": {
+        "status": "assessment_only",
+        "note": "The profile keeps dateOfBirth, not age, and a date of birth cannot be worked out from an age.",
+        "stores": [
+          {
+            "path": "CardioAssessment.assessmentData.demographics.age",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "bloodGroup": {
+        "status": "stored",
+        "note": "Family profiles have no blood group field.",
+        "stores": [
+          {
+            "path": "User.profile.bloodGroup",
+            "via": "PATCH /api/users/updateMe",
+            "scope": "self"
+          }
+        ]
+      },
+      "height": {
+        "status": "stored",
+        "note": "Family profiles have no height field.",
+        "stores": [
+          {
+            "path": "User.profile.height",
+            "via": "PATCH /api/users/updateMe",
+            "scope": "self"
+          },
+          {
+            "path": "CardioAssessment.assessmentData.anthropometry.height",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "weight": {
+        "status": "stored",
+        "stores": [
+          {
+            "path": "Vital{vitalType: weight}",
+            "via": "POST /api/vitals",
+            "scope": "profile"
+          },
+          {
+            "path": "User.profile.weight (+ profile.bmi)",
+            "via": "POST /api/vitals or PATCH /api/users/updateMe",
+            "scope": "self"
+          },
+          {
+            "path": "CardioAssessment.assessmentData.anthropometry.weight",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "waist": {
+        "status": "assessment_only",
+        "stores": [
+          {
+            "path": "CardioAssessment.assessmentData.anthropometry.waistCircumference",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "hip": {
+        "status": "raw_only",
+        "note": "The controller writes anthropometry.hipCircumference, but the model has no such field, so it is dropped on save.",
+        "stores": [
+          {
+            "path": "CardioAssessment.rawFormData.hip",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "neck": {
+        "status": "raw_only",
+        "note": "The controller writes anthropometry.neckCircumference, but the model has no such field, so it is dropped on save.",
+        "stores": [
+          {
+            "path": "CardioAssessment.rawFormData.neck",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "sbp": {
+        "status": "stored",
+        "stores": [
+          {
+            "path": "Vital{vitalType: blood_pressure}.value.systolic",
+            "via": "POST /api/vitals",
+            "scope": "profile"
+          },
+          {
+            "path": "User.latestVitals.bloodPressure.systolic",
+            "via": "POST /api/vitals",
+            "scope": "self"
+          },
+          {
+            "path": "CardioAssessment.assessmentData.bloodPressure.systolic",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "dbp": {
+        "status": "stored",
+        "stores": [
+          {
+            "path": "Vital{vitalType: blood_pressure}.value.diastolic",
+            "via": "POST /api/vitals",
+            "scope": "profile"
+          },
+          {
+            "path": "User.latestVitals.bloodPressure.diastolic",
+            "via": "POST /api/vitals",
+            "scope": "self"
+          },
+          {
+            "path": "CardioAssessment.assessmentData.bloodPressure.diastolic",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "tc": {
+        "status": "assessment_only",
+        "stores": [
+          {
+            "path": "CardioAssessment.assessmentData.lipids.totalCholesterol",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "ldl": {
+        "status": "assessment_only",
+        "stores": [
+          {
+            "path": "CardioAssessment.assessmentData.lipids.ldl",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "hdl": {
+        "status": "assessment_only",
+        "stores": [
+          {
+            "path": "CardioAssessment.assessmentData.lipids.hdl",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "trig": {
+        "status": "raw_only",
+        "stores": [
+          {
+            "path": "CardioAssessment.rawFormData.trig",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "hba1c": {
+        "status": "raw_only",
+        "note": "calculate-score reads only diabetes status from this step.",
+        "stores": [
+          {
+            "path": "CardioAssessment.rawFormData.hba1c",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "fbg": {
+        "status": "raw_only",
+        "note": "calculate-score reads only diabetes status from this step. Vital blood_glucose has no fasting flag.",
+        "stores": [
+          {
+            "path": "CardioAssessment.rawFormData.fbg",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "crp": {
+        "status": "assessment_only",
+        "stores": [
+          {
+            "path": "CardioAssessment.assessmentData.biomarkers.hscrp",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "egfr": {
+        "status": "derived_only",
+        "note": "Only kidneyFunction 'ckd3' (below 60) or 'normal' is kept; the model's biomarkers.egfr is never written.",
+        "stores": [
+          {
+            "path": "CardioAssessment.assessmentData.organAssessment.kidneyFunction",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "microalbumin": {
+        "status": "raw_only",
+        "stores": [
+          {
+            "path": "CardioAssessment.rawFormData.microalbumin",
+            "via": "POST /api/vitals/calculate-score",
+            "scope": "profile"
+          }
+        ]
+      },
+      "creatinine": {
+        "status": "no_store",
+        "stores": []
+      },
+      "hemoglobin": {
+        "status": "no_store",
+        "stores": []
+      },
+      "vitamin_d": {
+        "status": "no_store",
+        "stores": []
+      },
+      "tsh": {
+        "status": "no_store",
+        "stores": []
+      },
+      "crp_standard": {
+        "status": "no_store",
+        "note": "Standard CRP is not hs-CRP and must not go into biomarkers.hscrp.",
+        "stores": []
+      },
+      "urine_acr": {
+        "status": "no_store",
+        "stores": []
+      },
+      "urine_microalbumin": {
+        "status": "no_store",
+        "stores": []
+      },
+      "reportFile": {
+        "status": "no_store",
+        "note": "Media.type allows only video, image and resource, and Media is built around programmes; there is no home for an uploaded lab report.",
+        "stores": []
+      }
+    }
+  },
+  "x-unitAliases": {
+    "description": "Raw unit strings seen on Indian lab reports, mapped to the canonical spelling before validation. OCR routinely mangles the micro sign and the solidus.",
+    "mg/dl": "mg/dL", "mg / dl": "mg/dL", "mgs/dl": "mg/dL", "mg%": "mg/dL", "mg/100ml": "mg/dL",
+    "mmol/l": "mmol/L", "mmoi/l": "mmol/L",
+    "g/dl": "g/dL", "gm/dl": "g/dL", "gms/dl": "g/dL", "g%": "g/dL",
+    "mg/l": "mg/L", "mgs/l": "mg/L",
+    "µiu/ml": "uIU/mL", "uiu/ml": "uIU/mL", "μiu/ml": "uIU/mL", "miu/l": "mIU/L",
+    "µmol/l": "umol/L", "μmol/l": "umol/L", "umol/l": "umol/L",
+    "ng/ml": "ng/mL", "nmol/l": "nmol/L",
+    "ml/min/1.73m2": "mL/min/1.73m2", "ml/min/1.73 m2": "mL/min/1.73m2", "ml/min": "mL/min/1.73m2",
+    "mmol/mol": "mmol/mol", "mg/g": "mg/g", "mg/g creatinine": "mg/g", "mg/gcr": "mg/g", "mg/mmol": "mg/mmol", "µg/dl": "ug/dL", "μg/dl": "ug/dL", "ug/dl": "ug/dL",
+    "%": "%", "10^6/ul": "10^6/uL", "10^6/µl": "10^6/uL", "10^6/μl": "10^6/uL", "10^6/cu.mm": "10^6/uL", "10^6/cumm": "10^6/uL", "10^6/mm3": "10^6/uL", "x10^6/ul": "10^6/uL", "mill/cumm": "10^6/uL", "million/cumm": "10^6/uL", "mill/mm3": "10^6/uL", "millions/cumm": "10^6/uL", "10^3/ul": "10^3/uL", "10^3/µl": "10^3/uL", "10^3/μl": "10^3/uL", "10^3/cu.mm": "10^3/uL", "10^3/cumm": "10^3/uL", "10^3/mm3": "10^3/uL", "x10^3/ul": "10^3/uL", "thou/mm3": "10^3/uL", "thou/ul": "10^3/uL", "thou/cumm": "10^3/uL", "10^9/l": "10^3/uL", "cells/cumm": "cells/uL", "/cumm": "cells/uL", "cells/ul": "cells/uL", "/ul": "cells/uL", "/mm3": "cells/uL", "cells/mm3": "cells/uL", "lakh/cumm": "lakh/uL", "lakhs/cumm": "lakh/uL", "lakh/ul": "lakh/uL", "lakh/mm3": "lakh/uL", "lakhs/ul": "lakh/uL", "fl": "fL", "pg": "pg", "mm/hr": "mm/hr", "mm/1sthr": "mm/hr", "mm/1st hr": "mm/hr", "mm/hour": "mm/hr", "mm/h": "mm/hr", "u/l": "U/L", "iu/l": "U/L", "u/litre": "U/L", "meq/l": "mEq/L", "pg/ml": "pg/mL", "ng/dl": "ng/dL", "iu/ml": "IU/mL", "ratio": "ratio", "g/l": "g/L"
+  }
+}

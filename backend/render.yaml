@@ -1,0 +1,17 @@
+services:
+  # PreventVital OCR backend — free web service on Render.
+  # Deploys from the Dockerfile in this directory (root dir = backend/).
+  - type: web
+    name: preventvital-ocr
+    runtime: docker
+    plan: free
+    region: singapore          # closest free region to India
+    dockerfilePath: ./Dockerfile
+    dockerContext: ./
+    healthCheckPath: /
+    autoDeploy: false          # no auto-deploy; we promote manually
+    envVars:
+      - key: EXTRACT_MAX_FILES
+        value: "5"
+      - key: OCR_TIMEOUT_MS
+        value: "60000"

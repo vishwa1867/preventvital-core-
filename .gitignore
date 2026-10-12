@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# Expo
+frontend/.expo/
+frontend/dist/
+frontend/web-build/
+frontend/expo-env.d.ts
+frontend/.git/
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Env
+.env
+*.env
